@@ -1,0 +1,281 @@
+---
+title: "PEC 1"
+author: "Miguel Díaz Martín"
+date: "`r Sys.Date()`"
+output: 
+  pdf_document:
+    toc: true
+lang: "es"
+---
+
+```{r setup, echo=FALSE, include=FALSE}
+library(SummarizedExperiment)
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(caret)
+library(factoextra)
+library(class)
+library(gmodels)
+
+set.seed(234)
+
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Abstract
+
+En este estudio se ha hecho un análisis de cluster a los biomarcadores del conjunto de datos GastricCancer_NMR, consiguiendo dividirlos en tres grupos bien definidos.
+
+Además, se ha creado un clasificador con el objetivo de predecir el estado de salud de nuevos individuos a partir de sus biomarcadores.
+
+# Objetivos del estudio
+
+Se va a trabajar con un dataset que contiene diferentes biomarcadores junto con el estado de salud, relacionado con el cáncer gástrico, de diferentes individuos.
+
+El estudio se va a dividir en dos partes:
+
+- Análisis de cluster, donde se pretende explorar la división de todos los datos en diferentes grupos y ver cómo se relacionan estos grupos creados con el estado de salud de los individuos con el algoritmo K-Means.
+
+- Creación de un clasificador que genere predicciones del estado de salud de los individuos a partir de sus biomarcadores con el algoritmo K-NN, con el objetivo de conseguir un sistema de detección de cáncer gástrico.
+
+Además, en las dos partes se intentará optimizar los datos para obtener los mejores resultados posibles.
+
+# Materiales y métodos
+
+## Datos
+
+Los datos consisten en 149 diferentes biomarcadores obtenidos a partir de muestras de orina de 140 pacientes. Se puede ver más información sobre los datos en [DOI:10.21228/M8B10B](https://www.metabolomicsworkbench.org/data/DRCCMetadata.php?Mode=Project&ProjectID=PR000699).
+
+## Herramientas
+
+Para hacer el estudio se ha usado principalmente el lenguaje de programación R, junto con RMarkdown.
+
+## Métodos
+
+Para hacer el análisis de cluster y el clasificador, se han usado los algoritmos K-Means y K-NN respectivamente.
+
+Además, se han hecho transformaciones logarítmicas y estandarización para normalizar los datos.
+
+Para evaluar los resultados del clasificador se han usado tablas cruzadas.
+
+# Resultados
+
+## Descripción de los datos
+
+Para este trabajo hemos decidido que vamos a usar el dataset GastricCancer_NMR, que se encuentra en el repositorio [metaboData](https://github.com/nutrimetabolomics/metaboData).
+
+Este dataset consiste en una recopilación de biomarcadores recopilados para cada individuo, relacionándolos con su estado en relación al cáncer gástrico.
+
+Hay tres diferentes estados:
+
+- `GC`: El individuo tiene cáncer gástrico
+- `BN`: El individuo tiene una enfermedad gástrica benigna.
+- `HE`: El individuo está sano.
+
+Estos diferentes estados vienen relacionados con hasta 149 biomarcadores.
+
+En total hay 140 individuos en el dataset.
+
+
+## Obtención y procesamiento de los datos
+
+Para descargar los datos usamos el siguiente comando:
+
+$ wget -O GastricCancer_NMR.xlsx https://github.com/nutrimetabolomics/metaboData/raw/refs/heads/main/Datasets/2023-CIMCBTutorial/GastricCancer_NMR.xlsx
+
+Este fichero contiene dos diferentes hojas de datos: `Data`, donde están definidas todas las filas del dataset, y `Peak`, donde se definen los nombres de las columnas junto con otros datos relevantes.
+
+Cargamos un dataframe con los datos que hay en el fichero y asignamos los nombres de las columnas que tenemos en la hoja `Peak`:
+
+```{r}
+gastric_cancer <- read_excel("GastricCancer_NMR.xlsx", sheet="Data")
+peak <- read_excel("GastricCancer_NMR.xlsx", sheet="Peak")
+
+gastric_cancer <- rename_at(gastric_cancer, peak$Name, ~ peak$Label)
+```
+
+También vamos a descartar las 3 primeras columnas y los individuos que se encuentran en la clase de control de calidad, ya que no nos van a ser de utilidad en este estudio:
+
+```{r}
+gastric_cancer <- gastric_cancer[c(-1, -2, -3)]
+gastric_cancer <- gastric_cancer[gastric_cancer$Class != "QC",]
+```
+
+Preparamos un factor para la clase, que es la columna que nos indica el estado de cada individuo:
+
+```{r}
+gastric_cancer$Class <- factor(gastric_cancer$Class, levels=c("GC", "BN", "HE"), labels=c("Gastric cancer", "Benign gastric disease", "Healthy"))
+```
+
+Para terminar, asignamos el valor arbitrario 1 a todos los valores ausentes para poder hacer los análisis sin problemas:
+
+```{r}
+gastric_cancer[is.na(gastric_cancer)] <- 1
+```
+
+## Uso de la clase SummarizedExperiment
+
+Para el estudio vamos a añadir los datos datos de los biomarcadores a una instancia de Summarized experiment, separándolos de la columna donde se encuentra el estado de los individuos:
+
+```{r}
+gastric_cancer_classes <- gastric_cancer$Class
+gastric_cancer <- gastric_cancer[-1]
+gastric_cancer_se <- SummarizedExperiment(colData=colnames(gastric_cancer), assays=gastric_cancer)
+```
+
+
+## Primera parte: Análisis de cluster
+
+Vamos a empezar preparando una función para representar los clusters que obtengamos. En la gráfica aparecerá cada cluster generado marcado con un color diferente, mientras que la clase de cada individuo vendrá marcada con una forma.
+
+```{r}
+plot_cluster_with_class <- function (clust, gc_data, gc_class) {
+  pca <- prcomp(gc_data, scale=T)
+  coord <- as.data.frame(get_pca_ind(pca)$coord)
+  coord$cluster <- factor(clust$cluster)
+  coord$class <- gc_class
+  
+return (
+  ggscatter(coord, x="Dim.1", y="Dim.2", color="cluster", shape="class", legend="right",
+           ellipse=T, ellipse.type="convex") + stat_mean(aes(color=cluster), size=4)
+  )
+}
+```
+
+Queremos ver cómo se dividen los datos en 3 grupos, que es el número de clases con el que estamos trabajando.
+
+Generamos el cluster con k-means y representamos el resultado:
+
+```{r}
+km <- kmeans(assay(gastric_cancer_se), centers=3)
+plot_cluster_with_class(km, assay(gastric_cancer_se), gastric_cancer_classes)
+```
+
+No parece que haya una buena división entre 3 grupos, uno de los clusters es mucho más pequeño que los otros dos.
+
+Para ver si podemos mejorar los resultados, vamos a comparar los rangos en los que se encuentra cada columna de nuestro dataset:
+
+```{r}
+for(c in colnames(assay(gastric_cancer_se))) {
+  print(
+    paste0("Rango: (", min(assay(gastric_cancer_se)[c]), ", ", max(assay(gastric_cancer_se)[c]), ")")
+  )
+}
+```
+
+Algunos de los rangos empiezan en 1, que es el número que asignamos anteriormente a los valores ausentes. Sin embargo, esta salida nos sirve de sobra para llegar a la conclusión de que los rangos de las columnas son muy distintas entre sí, por lo que pueden estar afectando unas más que otras al cálculo del cluster.
+
+Para solucionar esto vamos a normalizar los datos, de forma que todas las columnas se muevan en el mismo rango, y ver cómo afecta esta transformación a los cluster obtenidos.
+
+### Normalización logarítmica
+
+Una forma de normalizar los datos es calculando el logaritmo:
+
+```{r}
+gastric_cancer_log <- log(assay(gastric_cancer_se))
+km <- kmeans(gastric_cancer_log, centers=3)
+plot_cluster_with_class(km, gastric_cancer_log, gastric_cancer_classes)
+```
+
+Podemos ver que con esta transformación conseguimos tres grupos mucho mejor definidos, y parece que hay diferentes proporciones de las clases en cada grupo.
+
+### Estandarización
+
+También podemos probar estandarizando las muestras, que es un proceso que se hace aplicando la siguiente fórmula a cada columna:
+
+$$
+\frac{X - \mu}{\sigma}
+$$
+
+Siendo $\mu$ la media y $\sigma$ la desviación estándar.
+
+```{r}
+standarize <- function(l) {
+  return((l - mean(l)) / sd(l))
+}
+
+gastric_cancer_standarized <- apply(assay(gastric_cancer_se), 2, standarize)
+km <- kmeans(gastric_cancer_standarized, centers=3)
+plot_cluster_with_class(km, gastric_cancer_standarized, gastric_cancer_classes)
+```
+
+Con esta transformación también conseguimos tres grupos bien definidos, con diferentes proporciones de las clases.
+
+## Segunda parte: Predicción de la enfermedad según los biomarcadoes
+
+En esta parte pretendemos entrenar un clasificador que pueda predecir el estado de un individuo a partir de sus biomarcadores, usando el algoritmo K-NN. Este algoritmo funciona calculando la distancia de todas las variables del individuo con las variables de otros individuos, y asignándole la clase más comun en su k vecinos más cercanos, siendo k un número que asignamos de forma arbitraria.
+
+El algoritmo K-NN puede ser util para usar con los datos que estamos analizando porque funciona bien con datasets pequeños.
+
+Para empezar, vamos a separar nuestro dataset en dos partes, una de entrenamiento para preparar el algoritmo y otra de test para evaluar los resultados. La parte de entrenamiento serán dos tercios del dataset, y la parte de test será un tercio. Vamos a usar los datos que hemos estandarizado anteriormente:
+
+```{r}
+gc_train <- gastric_cancer_standarized[1:82,]
+classes_train <- gastric_cancer_classes[1:82]
+
+gc_test <- gastric_cancer_standarized[83:123,]
+classes_test <- gastric_cancer_classes[83:123]
+```
+
+A la hora de elegir el valor de k hay que tener en cuenta que, cuanto más grande sea, menor será el impacto del ruido en los datos, pero será más dificil tener en cuenta patrones que se representen en pocos individuos. Vamos a empezar con k = 7:
+
+```{r}
+preds <- knn(train=gc_train, test=gc_test, cl=classes_train, k=7)
+```
+
+Para evaluar los resultados vamos a usar una tabla cruzada, que dispone las predicciones junto con las clases reales, de forma que podemos ver la proporción de los fallos en las predicciones:
+
+```{r}
+CrossTable(x=classes_test, y=preds, prop.chisq=F)
+```
+
+En la tabla podemos ver el número de precicciones correctas, que serían las que podemos encontrar en la diagonal de la tabla. Como podemos ver, ha hecho unas buenas predicciones al deducir el cáncer, pero no han sido tan buenas para las otras clases.
+
+Vamos a ver la calidad de las predicciones que obtenemos con otros valores de k.
+
+Para k = 5:
+
+```{r}
+preds <- knn(train=gc_train, test=gc_test, cl=classes_train, k=5)
+CrossTable(x=classes_test, y=preds, prop.chisq=F)
+```
+
+Estos resultados parecen más deseables que los anteriores, ya que hay más diagnósticos de cáncer gástrico y menos diagnósticos de que los individuos están sanos cuando en realidad tienen la enfermedad.
+
+Para k = 9:
+
+```{r}
+preds <- knn(train=gc_train, test=gc_test, cl=classes_train, k=9)
+CrossTable(x=classes_test, y=preds, prop.chisq=F)
+```
+
+No parecen unos buenos resultados, hay muchos fallos en las predicciones.
+
+Por último, vamos a probar k=3:
+
+```{r}
+preds <- knn(train=gc_train, test=gc_test, cl=classes_train, k=3)
+CrossTable(x=classes_test, y=preds, prop.chisq=F)
+```
+
+No parece que los resultados sean mejores que los obtenidos con k= 5, por lo que parece que el mejor número de vecinos que podemos usar para la predicción de la salud de los pacientes es de 5, usando una normalización estándar de los biomarcadores.
+
+# Conclusión
+
+## Análisis de cluster
+
+Al comienzo parecía que no se podían dividir los datos en tres grupos, pero hemos podido ver que, tras normalizarlos, sí que se puede distinguir la división bien definida.
+
+## K-NN
+
+Se ha podido crear un clasificador que, aunque tenga dificultades prediciendo qué pacientes tienen una enfermedad benigna y cuáles están sanos, es capaz de predecir con un 80% de precisión si un paciente está enfermo de cáncer gástrico.
+
+# Limitaciones del estudio
+
+Algo que falta por hacer en este estudio sería un análisis para identificar qué diferentes biomarcadores del conjunto de datos afectan con más o menos importancia a la clasificación de la enfermedad de los individuos. De esta forma se podría hacer una mejor división de grupos en el análisis de cluster y se podría conseguir un mejor clasificador para predecir el estado de nuevos individuos.
+
+# Repositorio
+
+Link al repositorio de este trabajo: [Diaz-Martin-Miguel-PEC1](https://github.com/migueldm624/Diaz-Martin-Miguel-PEC1)
